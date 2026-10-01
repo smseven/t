@@ -21,6 +21,7 @@
 #include <thread>
 #include "security.hpp"
 #include "tls_transport.hpp"
+#include "pairing_window.hpp"
 
 using Clock = std::chrono::steady_clock;
 constexpr size_t HEADER_LIMIT = 16 * 1024;
@@ -122,6 +123,10 @@ struct Request {
     std::string header(const std::string& name) const {
         auto it = headers.find(name); return it == headers.end() ? "" : it->second;
     }
+    std::string contentType() const {
+        auto type = header("content-type");
+        return lower(trim(type.substr(0, type.find(';'))));
+    }
 };
 
 static Request readRequest(Connection& c) {
@@ -176,7 +181,7 @@ static std::string statusName(int code) {
     switch (code) {
     case 200: return "OK"; case 201: return "Created"; case 303: return "See Other";
     case 400: return "Bad Request"; case 401: return "Unauthorized"; case 403: return "Forbidden";
-    case 404: return "Not Found"; case 405: return "Method Not Allowed"; case 409: return "Conflict";
+    case 404: return "Not Found"; case 405: return "Method Not Allowed"; case 409: return "Conflict"; case 410: return "Gone";
     case 411: return "Length Required"; case 413: return "Payload Too Large"; case 429: return "Too Many Requests";
     case 431: return "Request Header Fields Too Large"; case 507: return "Insufficient Storage"; default: return "Internal Server Error";
     }
@@ -185,7 +190,7 @@ static bool sendHeaders(Connection& c, int code, const std::string& type, uint64
                         const std::string& extra = "", const std::string& nonce = "") {
     std::ostringstream h;
     h << "HTTP/1.1 " << code << " " << statusName(code) << "\r\nContent-Type: " << type << "\r\nContent-Length: " << length
-      << "\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer"
+      << "\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin"
       << "\r\nX-Frame-Options: DENY\r\nPermissions-Policy: camera=(), microphone=(), geolocation=()\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; connect-src 'self'; ";
     if (nonce.empty()) h << "script-src 'none'; style-src 'none'";
     else h << "script-src 'nonce-" << nonce << "'; style-src 'nonce-" << nonce << "'";
@@ -213,6 +218,10 @@ class Authentication {
     std::map<std::string, Session> sessions_;
     struct Attempt { unsigned failures = 0; Clock::time_point start = Clock::now(); };
     std::map<std::string, Attempt> attempts_;
+    std::string qrTicket_;
+    Clock::time_point qrExpires_{};
+    bool qrUsed_ = false;
+    int qrSeconds_;
     void cleanup() {
         auto now = Clock::now();
         for (auto it = sessions_.begin(); it != sessions_.end();) {
@@ -222,16 +231,46 @@ class Authentication {
             if (now - it->second.start >= std::chrono::seconds(60)) it = attempts_.erase(it); else ++it;
         }
     }
-public:
-    const std::string& pairing() const { return pairing_; }
-    std::string login(const std::string& code, const std::string& peer) {
-        std::lock_guard<std::mutex> lock(mutex_); cleanup();
+    Attempt& checkAttempts(const std::string& peer) {
+        cleanup();
         if (attempts_.size() >= 256 && !attempts_.count(peer)) throw HttpError(429, "Try again in one minute");
         auto& attempt = attempts_[peer];
         if (attempt.failures >= 5) throw HttpError(429, "Too many attempts; try again in one minute");
-        if (!constantEqual(code, pairing_)) { ++attempt.failures; throw HttpError(401, "Incorrect pairing code"); }
+        return attempt;
+    }
+    std::string createSession() {
         if (sessions_.size() >= 16) throw HttpError(429, "Too many active sessions");
         auto id = randomHex(); sessions_[id] = {randomHex(), Clock::now() + std::chrono::seconds(SESSION_SECONDS)};
+        return id;
+    }
+public:
+    explicit Authentication(int qrSeconds = 120) : qrSeconds_(qrSeconds) {}
+    const std::string& pairing() const { return pairing_; }
+    std::string login(const std::string& code, const std::string& peer) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& attempt = checkAttempts(peer);
+        if (!constantEqual(code, pairing_)) { ++attempt.failures; throw HttpError(401, "Incorrect pairing code"); }
+        return createSession();
+    }
+    std::string issueQrTicket() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        qrTicket_ = randomHex(); qrExpires_ = Clock::now() + std::chrono::seconds(qrSeconds_); qrUsed_ = false;
+        return qrTicket_;
+    }
+    int qrStatus(const std::string& ticket) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!constantEqual(ticket, qrTicket_)) return -2;
+        if (qrUsed_) return -1;
+        if (Clock::now() >= qrExpires_) return 0;
+        return static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(qrExpires_ - Clock::now()).count()) + 1;
+    }
+    std::string loginQr(const std::string& ticket, const std::string& peer) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& attempt = checkAttempts(peer);
+        if (ticket.empty() || !constantEqual(ticket, qrTicket_)) { ++attempt.failures; throw HttpError(401, "Invalid QR pairing link"); }
+        if (qrUsed_ || Clock::now() >= qrExpires_) throw HttpError(410, "QR expired or already used; generate a new QR on Windows");
+        auto id = createSession();
+        qrUsed_ = true; // Consume and create session under one lock: only one scanner wins.
         return id;
     }
     std::optional<Session> get(const std::string& id) {
@@ -246,7 +285,7 @@ struct State {
     Authentication authentication;
     bool httpMode, readOnly;
     int port;
-    State(fs::path path, bool local, bool readonly, int p) : folder(path), httpMode(local), readOnly(readonly), port(p) {}
+    State(fs::path path, bool local, bool readonly, int p, int qrSeconds) : folder(path), authentication(qrSeconds), httpMode(local), readOnly(readonly), port(p) {}
     std::string cookieName() const { return httpMode ? "sharehub-local" : "__Host-sharehub"; }
 };
 static std::string sessionId(const Request& r, const std::string& name) {
@@ -270,7 +309,10 @@ static void validateOrigin(const Request& r, bool httpMode, const std::string& l
     if ((!origin.empty() && origin != expected) || (r.method == "POST" && origin != expected))
         throw HttpError(403, "Cross-origin request denied");
     auto site = r.header("sec-fetch-site");
-    if (!site.empty() && site != "same-origin" && site != "none") throw HttpError(403, "Cross-site request denied");
+    // Opening a camera-scanned link is a top-level navigation. It carries no
+    // credential in the HTTP URL and does not redeem a ticket until same-origin POST.
+    bool qrLanding = r.method == "GET" && r.path == "/pair";
+    if (!qrLanding && !site.empty() && site != "same-origin" && site != "none") throw HttpError(403, "Cross-site request denied");
 }
 
 static std::string pageStart(const std::string& nonce) {
@@ -282,8 +324,20 @@ static void sendPage(Connection& c, const std::string& body, const std::string& 
 }
 static void loginPage(Connection& c, bool httpMode) {
     auto nonce = randomHex(16);
-    auto body = pageStart(nonce) + (httpMode ? "<p><strong>비보안 모드 · HTTP</strong> — 연결 코드와 파일이 암호화되지 않습니다.</p>" : "<p><strong>보안 모드 · HTTPS</strong> — 연결 코드와 파일을 암호화하여 전송합니다.</p>") + R"(<p>Windows 앱에 표시된 연결 코드를 입력하세요. 연결은 30분 동안 유효합니다.</p><div class=box><form method=post action=/login><label>연결 코드<input name=code type=password autocomplete=off required maxlength=32 spellcheck=false></label><button>연결</button></form></div></html>)";
+    auto body = pageStart(nonce) + (httpMode ? "<p><strong>비보안 모드 · HTTP</strong> — 연결 코드와 파일이 암호화되지 않습니다.</p>" : "<p><strong>보안 모드 · HTTPS</strong> — 연결 코드와 파일을 암호화하여 전송합니다.</p>") + R"(<p>아이폰 카메라로 Windows 앱의 QR 코드를 찍고 링크를 누르면 자동으로 연결됩니다.</p><p>또는 연결 코드를 직접 입력하세요. 연결은 30분 동안 유효합니다.</p><div class=box><form id=login method=post action=/login><label>연결 코드<input name=code type=password autocomplete=off required maxlength=32 spellcheck=false></label><button>연결</button><p id=status aria-live=polite></p></form></div><script nonce=')" + nonce + R"('>
+document.querySelector('#login').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,button=form.querySelector('button'),status=document.querySelector('#status');button.disabled=true;status.textContent='연결 중…';try{const response=await fetch('/login',{method:'POST',mode:'cors',credentials:'same-origin',referrerPolicy:'same-origin',body:new URLSearchParams(new FormData(form))});if(response.ok){form.reset();location.replace('/browse')}else{status.textContent=response.status===401?'연결 코드가 올바르지 않습니다.':response.status===429?'입력 시도가 너무 많습니다. 1분 후 다시 시도하세요.':'연결하지 못했습니다. 페이지를 새로고침하고 다시 시도하세요.'}}catch(error){status.textContent='연결을 확인하고 다시 시도하세요.'}finally{button.disabled=false}};
+</script></html>)";
     sendPage(c, body, nonce);
+}
+static void qrLandingPage(Connection& c, bool httpMode) {
+    auto nonce = randomHex(16);
+    auto body = pageStart(nonce) + (httpMode ? "<p><strong>비보안 모드 · HTTP</strong> — 연결 정보와 파일이 암호화되지 않습니다.</p>" : "<p><strong>보안 모드 · HTTPS</strong></p>") + R"(<section class=box><p id=status aria-live=polite>QR로 연결 중…</p><a href='/'>수동 연결 화면</a></section><script nonce=')" + nonce + R"('>
+(async()=>{const params=new URLSearchParams(location.hash.slice(1));let ticket=params.get('ticket')||'';history.replaceState(null,'','/pair');const status=document.querySelector('#status');if(Array.from(params.keys()).length!==1||!/^[a-f0-9]{64}$/.test(ticket)){status.textContent='올바른 QR 링크가 아닙니다. Windows 앱에서 새 QR을 찍어 주세요.';return}try{const body=new URLSearchParams({ticket});ticket='';params.delete('ticket');const response=await fetch('/pair',{method:'POST',mode:'cors',credentials:'same-origin',referrerPolicy:'same-origin',headers:{'X-Pairing-Request':'1'},body});if(response.ok){location.replace('/browse')}else if(response.status===410||response.status===401){status.textContent='QR이 만료되었거나 이미 사용되었습니다. Windows 앱에서 새 QR을 찍어 주세요.'}else if(response.status===429){status.textContent='연결 시도가 너무 많습니다. 잠시 후 다시 시도하세요.'}else{status.textContent='연결하지 못했습니다. Windows 앱에서 새 QR을 찍어 주세요.'}}catch(error){status.textContent='연결이 끊겼습니다. Wi-Fi를 확인하고 Windows 앱에서 새 QR을 찍어 주세요.'}})();
+</script></html>)";
+    sendPage(c, body, nonce);
+}
+static std::string sessionCookie(const State& state, const std::string& id) {
+    return "Set-Cookie: " + state.cookieName() + "=" + id + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + std::to_string(SESSION_SECONDS) + (state.httpMode ? "" : "; Secure") + "\r\n";
 }
 static void browse(Connection& c, State& state, const Session& session, const std::string& relative) {
     auto dir = state.folder.directory(relative);
@@ -336,14 +390,24 @@ if(form)form.onsubmit=async event=>{event.preventDefault();const files=[...docum
 
 static void serve(Connection& c, State& state, const std::string& peer, const std::string& localIp) {
     auto r = readRequest(c); validateOrigin(r, state.httpMode, localIp, state.port);
+    if (r.path == "/pair" && r.method == "GET") {
+        if (!r.query.empty()) throw HttpError(400, "QR credentials must not be placed in the URL query");
+        qrLandingPage(c, state.httpMode); return;
+    }
+    if (r.path == "/pair" && r.method == "POST") {
+        if (!r.query.empty() || r.header("x-pairing-request") != "1" || r.contentType() != "application/x-www-form-urlencoded")
+            throw HttpError(400, "Unsupported QR pairing request");
+        auto params = parameters(smallBody(c, r, 128));
+        if (params.size() != 1 || !params.count("ticket")) throw HttpError(400, "QR ticket is required");
+        auto id = state.authentication.loginQr(params.at("ticket"), peer);
+        reply(c, 200, "Connected", sessionCookie(state, id)); return;
+    }
     if (r.path == "/login" && r.method == "POST") {
-        if (r.header("content-type") != "application/x-www-form-urlencoded") throw HttpError(400, "Unsupported login body");
+        if (r.contentType() != "application/x-www-form-urlencoded") throw HttpError(400, "Unsupported login body");
         auto params = parameters(smallBody(c, r, 128));
         if (params.size() != 1 || !params.count("code")) throw HttpError(400, "A pairing code is required");
         auto id = state.authentication.login(params.at("code"), peer);
-        std::string cookie = "Set-Cookie: " + state.cookieName() + "=" + id + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" + std::to_string(SESSION_SECONDS);
-        if (!state.httpMode) cookie += "; Secure";
-        reply(c, 303, "Connected", cookie + "\r\nLocation: /browse\r\n"); return;
+        reply(c, 303, "Connected", sessionCookie(state, id) + "Location: /browse\r\n"); return;
     }
     auto id = sessionId(r, state.cookieName()); auto session = state.authentication.get(id);
     if (!session) {
@@ -473,17 +537,19 @@ static std::vector<std::string> localAddresses() {
 }
 int main() {
     SetConsoleOutputCP(CP_UTF8);
+    SetProcessDPIAware(); // Keep QR modules on physical pixel boundaries.
     try {
         int argc; LPWSTR* raw = CommandLineToArgvW(GetCommandLineW(), &argc);
         if (!raw) throw std::runtime_error("Cannot read arguments");
         std::vector<std::wstring> args(raw, raw + argc); LocalFree(raw);
-        fs::path folder = L"Shared"; bool httpMode = false, readOnly = false, forceLoopback = false;
-        std::string bindAddress = "0.0.0.0"; int port = 8765; std::wstring thumbprint;
+        fs::path folder = L"Shared"; bool httpMode = false, readOnly = false, forceLoopback = false, noQrWindow = false;
+        std::string bindAddress = "0.0.0.0"; int port = 8765, qrSeconds = 120; std::wstring thumbprint;
         for (size_t i = 1; i < args.size(); ++i) {
             auto arg = args[i];
             if (arg == L"--local-http") { httpMode = true; forceLoopback = true; }
             else if (arg == L"--read-only") readOnly = true;
-            else if (arg == L"--folder" || arg == L"--port" || arg == L"--bind" || arg == L"--cert-thumbprint" || arg == L"--mode") {
+            else if (arg == L"--no-qr-window") noQrWindow = true;
+            else if (arg == L"--folder" || arg == L"--port" || arg == L"--bind" || arg == L"--cert-thumbprint" || arg == L"--mode" || arg == L"--qr-seconds") {
                 if (++i >= args.size()) throw std::runtime_error("Missing option value");
                 if (arg == L"--mode") {
                     if (args[i] != L"secure" && args[i] != L"basic") throw std::runtime_error("Mode must be secure or basic");
@@ -493,12 +559,18 @@ int main() {
                 else if (arg == L"--cert-thumbprint") thumbprint = args[i];
                 else if (arg == L"--bind") bindAddress.assign(args[i].begin(), args[i].end());
                 else {
-                    if (args[i].empty() || args[i].find_first_not_of(L"0123456789") != std::wstring::npos) throw std::runtime_error("Invalid port");
-                    unsigned long p = std::stoul(args[i]); if (p < 1 || p > 65535) throw std::runtime_error("Invalid port"); port = static_cast<int>(p);
+                    if (args[i].empty() || args[i].find_first_not_of(L"0123456789") != std::wstring::npos) throw std::runtime_error("Invalid numeric option");
+                    unsigned long p = std::stoul(args[i]);
+                    if (arg == L"--qr-seconds") {
+                        if (p < 5 || p > 300) throw std::runtime_error("QR validity must be 5 to 300 seconds");
+                        qrSeconds = static_cast<int>(p);
+                    } else { if (p < 1 || p > 65535) throw std::runtime_error("Invalid port"); port = static_cast<int>(p); }
                 }
             } else if (arg == L"--help") {
                 std::cout << "sharehub.exe [--mode secure|basic] [--folder PATH] [--port 8765] [--bind IPv4] [--read-only]\n"
-                          << "HTTPS requires setup-https.ps1 first. --local-http is loopback-only for development.\n"; return 0;
+                          << "QR pairing window opens by default. --qr-seconds 5..300 sets QR validity (default120).\n"
+                          << "--no-qr-window prints a one-use QR link instead. HTTPS requires setup-https.ps1 first.\n"
+                          << "--local-http is loopback-only for development.\n"; return 0;
             } else throw std::runtime_error("Unknown option; run --help");
         }
         if (forceLoopback) {
@@ -517,7 +589,7 @@ int main() {
             if (thumbprint.empty()) throw std::runtime_error("HTTPS certificate not configured. Run setup-https.ps1, or explicitly choose --mode basic for unencrypted HTTP.");
             tls = std::make_unique<TlsServer>(thumbprint);
         }
-        State state(folder, httpMode, readOnly, port);
+        State state(folder, httpMode, readOnly, port, qrSeconds);
         WSADATA wsa{}; if (WSAStartup(MAKEWORD(2, 2), &wsa)) throw std::runtime_error("Winsock initialization failed");
         struct WsaCleanup { ~WsaCleanup() { WSACleanup(); } } cleanup;
         SOCKET server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -531,12 +603,29 @@ int main() {
         std::cout << "ShareHub " << (httpMode ? "BASIC MODE (HTTP, NOT ENCRYPTED)" : "SECURE MODE (HTTPS)") << "\nFolder: " << state.folder.root().u8string() << "\n";
         auto addresses = bindAddress == "0.0.0.0" ? localAddresses() : std::vector<std::string>{bindAddress};
         if (addresses.empty()) addresses.push_back("127.0.0.1");
-        for (const auto& ip : addresses) std::cout << (httpMode ? "http://" : "https://") << ip << ":" << port << "/\n";
+        std::vector<std::string> origins;
+        for (const auto& ip : addresses) {
+            // Browsers omit default ports when serializing Origin/Host.
+            auto suffix = port == (httpMode ? 80 : 443) ? "" : ":" + std::to_string(port);
+            auto origin = (httpMode ? "http://" : "https://") + ip + suffix;
+            origins.push_back(origin); std::cout << origin << "/\n";
+        }
+        if (noQrWindow) {
+            auto ticket = state.authentication.issueQrTicket();
+            std::cout << "QR pairing link: " << origins.front() << "/pair#ticket=" << ticket << "\n";
+        }
         std::cout << "Pairing code: " << state.authentication.pairing() << "\n"
                   << "Sessions expire in 30 minutes. " << (readOnly ? "Download only. " : "Existing files are never overwritten. ")
                   << "Press Ctrl+C to stop.\n" << std::flush;
         if (httpMode) std::cout << "HTTP does not encrypt pairing codes or files.\n" << std::flush;
         Workers workers(state, tls.get());
+        std::unique_ptr<PairingWindow> qrWindow;
+        if (!noQrWindow) {
+            qrWindow = std::make_unique<PairingWindow>(origins, httpMode,
+                [&state] { return state.authentication.issueQrTicket(); },
+                [&state](const std::string& ticket) { return state.authentication.qrStatus(ticket); },
+                [] { auto socket = listener.exchange(INVALID_SOCKET); if (socket != INVALID_SOCKET) closesocket(socket); });
+        }
         for (;;) {
             sockaddr_in remote{}; int remoteSize = sizeof(remote);
             SOCKET client = accept(server, reinterpret_cast<sockaddr*>(&remote), &remoteSize);

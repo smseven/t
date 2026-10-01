@@ -130,13 +130,17 @@ struct PairingWindow::Impl {
             WNDCLASSW wc{}; wc.lpfnWndProc=proc; wc.hInstance=instance; wc.lpszClassName=L"ShareHubPairingWindowV1";
             wc.hCursor=LoadCursorW(nullptr,MAKEINTRESOURCEW(32512)); wc.hbrBackground=(HBRUSH)GetStockObject(WHITE_BRUSH);
             if(!RegisterClassW(&wc) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw std::runtime_error("Cannot register pairing window");
-            HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"ShareHub · 아이폰 QR 페어링",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,
-                CW_USEDEFAULT,CW_USEDEFAULT,570,740,nullptr,nullptr,instance,this);
+            RECT work{};
+            if (!SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0)) work={0,0,1024,768};
+            int height=std::min(740,static_cast<int>(work.bottom-work.top)-24);
+            HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"ShareHub · 아이폰 QR 페어링",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN,
+                CW_USEDEFAULT,CW_USEDEFAULT,570,height,nullptr,nullptr,instance,this);
             if(!hwnd) throw std::runtime_error("Cannot create pairing window");
             font=CreateFontW(-18,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Malgun Gothic");
             combo=CreateWindowExW(0,L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,24,52,350,240,hwnd,(HMENU)1,instance,nullptr);
             HWND button=CreateWindowExW(0,L"BUTTON",L"새 QR",WS_CHILD|WS_VISIBLE|WS_TABSTOP,390,52,130,32,hwnd,(HMENU)2,instance,nullptr);
-            label=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_CENTER,18,640,530,40,hwnd,nullptr,instance,nullptr);
+            RECT client{}; GetClientRect(hwnd,&client);
+            label=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_CENTER,18,client.bottom-54,530,40,hwnd,nullptr,instance,nullptr);
             if(!combo || !button || !label || !font) throw std::runtime_error("Cannot create pairing controls");
             for(HWND control:{combo,button,label}) SendMessageW(control,WM_SETFONT,(WPARAM)font,TRUE);
             for(const auto& origin:origins) SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)wide(origin).c_str());

@@ -1,10 +1,10 @@
 @echo off
 cd /d "%~dp0"
-if not exist sharehub.exe (
+if not exist build\sharehub.exe (
   echo Build sharehub.exe with build-and-run.bat first.
   pause
   exit /b 1
 )
 echo Basic mode: pairing codes and files are not encrypted.
-sharehub.exe --mode basic %*
+build\sharehub.exe --mode basic %*
 pause

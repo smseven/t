@@ -15,9 +15,15 @@
 
 ## 바로 실행하기
 
-`sharehub.exe`가 있으면 원하는 모드의 `.bat`을 실행합니다. 새로 빌드하려면 `build-and-run.bat`을 실행하고 모드를 선택하세요. 실행 창의 주소를 같은 Wi-Fi의 iPhone Safari에서 열고 `Pairing code`에 표시된 코드를 로그인 화면에 입력합니다. 파일을 선택해 업로드하거나, 목록의 파일을 눌러 다운로드합니다. 종료는 Windows 실행 창에서 `Ctrl+C`를 누릅니다.
+새 버전 실행 파일은 `build\sharehub.exe`입니다. 이전 버전이 실행 중이면 창을 닫고 `start-secure.bat` 또는 `start-basic.bat`을 실행하세요. 새로 빌드하려면 `build-and-run.bat`을 실행하고 모드를 선택합니다. 배치 파일은 앱 폴더에서 실행하므로 기존 인증서 설정과 `Shared` 폴더를 그대로 사용합니다.
 
-연결 코드는 URL과 파일에 저장하지 않습니다. 연결된 iPhone에서는 `연결 종료` 버튼으로 세션을 해제할 수 있습니다. 업로드 대상에 같은 이름의 파일이 있으면 거절하므로, 새 이름으로 업로드하세요.
+Windows에 QR 페어링 창이 열립니다. 같은 Wi-Fi의 iPhone 카메라로 QR을 찍고 나타난 링크를 누르면 Safari에서 자동으로 연결됩니다. 주소가 여러 개이면 QR 창의 목록에서 아이폰과 같은 Wi-Fi에 연결된 PC 주소를 선택하세요. 파일을 선택해 업로드하거나 목록에서 내려받습니다. QR 창을 닫거나 실행 창에서 `Ctrl+C`를 누르면 서버가 종료됩니다.
+
+QR은 기본 2분 동안 한 번만 사용할 수 있습니다. 만료되거나 이미 연결했다면 Windows 창에서 **새 QR**을 누르세요. 새 QR을 만들면 이전 QR은 즉시 무효가 됩니다. 보안 모드는 최초 아이폰 인증서 신뢰 설정이 필요합니다. 인증서를 설정하는 동안 QR이 만료되었다면 새 QR을 만드세요. QR 생성에는 외부 서비스나 인터넷을 사용하지 않습니다.
+
+수동 입력도 사용할 수 있습니다. 실행 창의 주소를 Safari에서 열고 `Pairing code`를 입력하세요. 수동 연결 코드는 URL과 파일에 저장하지 않습니다. QR에는 별도의 일회용 토큰을 넣고, 브라우저는 이를 주소에서 지운 다음 서버에 전송합니다. 연결된 iPhone에서는 `연결 종료` 버튼으로 세션을 해제할 수 있습니다. 업로드 대상에 같은 이름의 파일이 있으면 거절하므로 새 이름으로 업로드하세요.
+
+이전 버전의 `Cross-origin request denied` 로그인 오류도 수정했습니다. 로그인 폼의 Origin을 `null`로 만드는 `no-referrer` 정책을 `same-origin`으로 바꾸고, 브라우저 로그인 전송에 맞는 문자 인코딩 표기를 처리합니다. 외부 사이트의 요청과 `Origin: null`은 계속 거절합니다. [브라우저 Referrer-Policy 동작 설명](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Referrer-Policy#effect_on_the_origin_header).
 
 ## 보안 모드 최초 설정
 
@@ -38,23 +44,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-https.ps1
 공유 폴더, 포트, 사용할 네트워크 주소를 지정할 수 있습니다.
 
 ```bat
-sharehub.exe --mode secure --folder "C:\공유 폴더" --port 8765
-sharehub.exe --mode basic --folder "C:\공유 폴더" --bind 192.168.0.10
-sharehub.exe --mode secure --read-only
+build\sharehub.exe --mode secure --folder "C:\공유 폴더" --port 8765
+build\sharehub.exe --mode basic --folder "C:\공유 폴더" --bind 192.168.0.10
+build\sharehub.exe --mode secure --read-only
 ```
 
 `--read-only`는 업로드를 차단합니다. `--cert-thumbprint`로 다른 서버 인증서를 지정할 수 있습니다. 기본 설정에서는 `tls-cert.txt`의 식별자를 사용합니다. `--local-http`는 개발용으로 HTTP를 `127.0.0.1`에만 바인딩합니다. 기본값은 IPv4 사설 인터페이스의 HTTPS이고 공인 IP 클라이언트는 거절합니다.
 
+`--qr-seconds 120`으로 QR 유효 시간을 5~300초 범위에서 지정할 수 있습니다. `--no-qr-window`는 QR 창 대신 일회용 연결 링크를 콘솔에 표시하는 개발/콘솔용 옵션입니다. 이 링크를 가진 사람은 유효 시간 안에 한 번 연결할 수 있습니다.
+
 Visual Studio Developer Command Prompt:
 
 ```bat
-cl /std:c++17 /utf-8 /EHsc /O2 /MT sharehub.cpp ws2_32.lib bcrypt.lib secur32.lib crypt32.lib shell32.lib /Fe:sharehub.exe
+if not exist build mkdir build
+cl /std:c++17 /utf-8 /EHsc /O2 /MT sharehub.cpp pairing_window.cpp third_party/qrcodegen.cpp ws2_32.lib bcrypt.lib secur32.lib crypt32.lib shell32.lib user32.lib gdi32.lib /Fo:build\ /Fe:build\sharehub.exe
 ```
 
 MinGW-w64:
 
 ```bat
-g++ -std=c++17 -O2 -Wall -Wextra sharehub.cpp -lws2_32 -lbcrypt -lsecur32 -lcrypt32 -lshell32 -o sharehub.exe
+if not exist build mkdir build
+g++ -std=c++17 -O2 -Wall -Wextra sharehub.cpp pairing_window.cpp third_party/qrcodegen.cpp -lws2_32 -lbcrypt -lsecur32 -lcrypt32 -lshell32 -luser32 -lgdi32 -o build\sharehub.exe
 ```
 
 서버 실행에 Python이나 OpenSSL은 필요하지 않습니다. MinGW 빌드는 해당 배포판의 C++ 런타임 DLL이 필요하므로 컴파일러의 `bin` 폴더가 PATH에 있어야 합니다. Windows 방화벽이 묻는 경우 사설 네트워크 접근을 허용해야 합니다. 게스트 Wi-Fi의 기기 간 격리 설정은 연결을 막을 수 있습니다.
@@ -75,6 +85,8 @@ g++ -std=c++17 -O2 -Wall -Wextra sharehub.cpp -lws2_32 -lbcrypt -lsecur32 -lcryp
 
 ## 검증
 
-빌드 후 `python -X utf8 tools/verify_security.py`로 실제 서버를 사용한 11개 통합 검증을 실행할 수 있습니다. 로그인, 쿠키, CSRF, 경로/정션/하드링크 차단, 덮어쓰기 방지, 중단 전송 정리, HTTP 프레이밍, 동시 전송, 읽기 전용 공유, 인증서 신뢰 확인, 인증서 없이 HTTPS 시작 거절을 검사합니다. 검증은 임시 CA와 서버 인증서를 현재 사용자 저장소에 만들고 종료 시 개인 키와 함께 제거하며, 시스템 신뢰나 방화벽 설정은 변경하지 않습니다.
+빌드 후 `python -X utf8 tools/verify_security.py`로 실제 서버를 사용한 14개 통합 검증을 실행할 수 있습니다. 기존 파일 공유·보안 검사에 QR의 원자적 1회 사용, 만료, 외부 요청 차단, HTTPS QR 세션, 브라우저 로그인 문자 인코딩 처리를 추가했습니다. 검증은 임시 CA와 서버 인증서를 현재 사용자 저장소에 만들고 종료 시 개인 키와 함께 제거하며, 시스템 신뢰나 방화벽 설정은 변경하지 않습니다. QR 인코더는 별도 디코더로 생성 주소와 일치하는지 확인했습니다. 실제 iPhone 카메라와 Safari에서의 검증은 별도로 필요합니다.
+
+QR 생성은 MIT 라이선스의 Nayuki 라이브러리를 사용합니다. 버전과 라이선스는 `third_party/README.md`에 기록되어 있습니다.
 
 구현 참고: [Windows 보안 난수](https://learn.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptgenrandom), [Windows 파일 이름 제한](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file), [OWASP CSRF 방어](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html).

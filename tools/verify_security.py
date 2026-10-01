@@ -17,10 +17,10 @@ import subprocess
 import tempfile
 import time
 import unittest
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit, parse_qs
 
 PROJECT = Path(__file__).resolve().parents[1]
-EXECUTABLE = PROJECT / "sharehub.exe"
+EXECUTABLE = PROJECT / "build" / "sharehub.exe"
 
 
 def powershell(script):
@@ -59,7 +59,7 @@ class Server:
                 probe.bind(("127.0.0.1", 0))
                 self.port = probe.getsockname()[1]
             self.origin = f"{'https' if mode == 'secure' else 'http'}://127.0.0.1:{self.port}"
-            self.process = subprocess.Popen([str(EXECUTABLE), "--mode", mode, "--bind", "127.0.0.1", "--folder", str(self.root), "--port", str(self.port), *extra],
+            self.process = subprocess.Popen([str(EXECUTABLE), "--mode", mode, "--no-qr-window", "--bind", "127.0.0.1", "--folder", str(self.root), "--port", str(self.port), *extra],
                                             cwd=self.work, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                             text=True, encoding="utf-8", errors="replace")
             self.lines = []
@@ -68,6 +68,9 @@ class Server:
                 if not line:
                     raise RuntimeError("Server did not start: " + "".join(self.lines))
                 self.lines.append(line)
+                if line.startswith("QR pairing link: "):
+                    self.qr_url = line.split(": ", 1)[1].strip()
+                    self.qr_ticket = parse_qs(urlsplit(self.qr_url).fragment)["ticket"][0]
                 if line.startswith("Pairing code: "):
                     self.code = line.split(": ", 1)[1].strip()
                     break
@@ -102,6 +105,11 @@ class Server:
         assert status == 200, page
         self.csrf = re.search(rb"data-csrf='([a-f0-9]+)'", page).group(1).decode()
         return headers, page
+
+    def pair_qr(self, **headers):
+        headers.setdefault("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+        headers.setdefault("X-Pairing-Request", "1")
+        return self.request("POST", "/pair", urlencode({"ticket": self.qr_ticket}), headers)
 
     def upload(self, name, body, **headers):
         headers.setdefault("Cookie", self.cookie)
@@ -272,6 +280,53 @@ class SecurityChecks(unittest.TestCase):
             result = subprocess.run([str(EXECUTABLE), "--mode", "secure"], cwd=work, capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(b"HTTPS certificate not configured", result.stderr)
+
+    def test_12_qr_single_use_and_origin(self):
+        for mode in ("basic", "secure"):
+            with self.subTest(mode=mode):
+                s = Server(mode=mode)
+                try:
+                    status, headers, page = s.request("GET", "/pair", headers={"Sec-Fetch-Site": "cross-site"})
+                    self.assertEqual(status, 200)
+                    self.assertNotIn(s.qr_ticket.encode(), page)
+                    self.assertIn(b"history.replaceState", page)
+                    self.assertEqual(headers["Referrer-Policy"], "same-origin")
+                    self.assertEqual(s.request("GET", "/pair?ticket=" + s.qr_ticket)[0], 400)
+                    self.assertEqual(s.pair_qr(Origin="https://attacker.invalid")[0], 403)
+                    self.assertEqual(s.pair_qr(Origin="null")[0], 403)
+                    self.assertEqual(s.pair_qr(**{"X-Pairing-Request": ""})[0], 400)
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                        responses = list(pool.map(lambda _: s.pair_qr(), range(2)))
+                    self.assertEqual(sorted(r[0] for r in responses), [200, 410])
+                    success = next(r for r in responses if r[0] == 200)
+                    cookie = success[1]["Set-Cookie"].split(";", 1)[0]
+                    status, _, page = s.request("GET", "/browse", headers={"Cookie": cookie})
+                    self.assertEqual(status, 200)
+                    self.assertIn(b"data-csrf=", page)
+                    self.assertEqual(s.pair_qr()[0], 410)
+                finally:
+                    s.close()
+
+    def test_13_qr_expiry(self):
+        s = Server(extra=("--qr-seconds", "5"))
+        try:
+            time.sleep(5.1)
+            self.assertEqual(s.pair_qr()[0], 410)
+        finally:
+            s.close()
+
+    def test_14_login_browser_content_type(self):
+        s = Server()
+        try:
+            status, headers, page = s.request("GET", "/")
+            self.assertEqual(headers["Referrer-Policy"], "same-origin")
+            self.assertIn(b"mode:'cors'", page)
+            self.assertEqual(s.request("POST", "/login", urlencode({"code": s.code}), {
+                "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", "Sec-Fetch-Site": "same-origin"})[0], 303)
+            self.assertEqual(s.request("POST", "/login", urlencode({"code": s.code}), {
+                "Content-Type": "application/x-www-form-urlencoded", "Origin": "null"})[0], 403)
+        finally:
+            s.close()
 
 
 if __name__ == "__main__":
