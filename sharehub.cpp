@@ -305,10 +305,11 @@ static void validateOrigin(const Request& r, bool httpMode, const std::string& l
     bool allowed = host == localIp + suffix || (localIp == "127.0.0.1" && host == "localhost" + suffix);
     if (!allowed) throw HttpError(403, "Unrecognized Host header; connect using the displayed IP address");
     auto origin = r.header("origin");
-    std::string expected = (httpMode ? "http://" : "https://") + host;
-    if ((!origin.empty() && origin != expected) || (r.method == "POST" && origin != expected))
-        throw HttpError(403, "Cross-origin request denied");
     auto site = r.header("sec-fetch-site");
+    std::string expected = (httpMode ? "http://" : "https://") + host;
+    bool sameSite = site == "same-origin";
+    if ((!origin.empty() && origin != expected) || (r.method == "POST" && origin != expected && !sameSite))
+        throw HttpError(403, "Cross-origin request denied");
     // Opening a camera-scanned link is a top-level navigation. It carries no
     // credential in the HTTP URL and does not redeem a ticket until same-origin POST.
     bool qrLanding = r.method == "GET" && r.path == "/pair";
@@ -381,7 +382,7 @@ static void browse(Connection& c, State& state, const Session& session, const st
     // User-controlled paths stay in escaped HTML attributes, never in JavaScript source.
     body << "</ul><div id=config data-dir='" << escape(relative) << "' data-csrf='" << session.csrf << "'></div><script nonce='" << nonce << R"('>
 const config=document.querySelector('#config').dataset;
-document.querySelector('#logout').onclick=async()=>{try{const r=await fetch('/logout',{method:'POST',headers:{'X-CSRF-Token':config.csrf},body:''});if(r.ok)location.href='/';else alert(await r.text())}catch(e){alert('연결을 종료하지 못했습니다.')}};
+const btn=document.querySelector('#logout');if(btn)btn.onclick=async()=>{btn.disabled=true;btn.textContent='종료 중…';try{const r=await fetch('/logout',{method:'POST',mode:'cors',credentials:'same-origin',referrerPolicy:'same-origin',headers:{'X-CSRF-Token':config.csrf},body:''});if(r.ok){if(location.pathname==='/'&&!location.search)location.reload();else location.replace('/');}else{alert(await r.text()||'연결을 종료하지 못했습니다.');btn.disabled=false;btn.textContent='연결 종료';}}catch(e){alert('연결을 종료하지 못했습니다.');btn.disabled=false;btn.textContent='연결 종료';}};
 const form=document.querySelector('#upload');
 if(form)form.onsubmit=async event=>{event.preventDefault();const files=[...document.querySelector('#files').files,...document.querySelector('#folder').files],button=document.querySelector('#send'),status=document.querySelector('#status'),progress=document.querySelector('#progress');if(!files.length){status.textContent='파일을 선택하세요.';return}button.disabled=true;let count=0;try{for(const file of files){if(file.size>2147483648)throw Error('파일이 2 GiB를 초과합니다: '+file.name);const path=[config.dir,file.webkitRelativePath||file.name].filter(Boolean).join('/');await new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open('POST','/api/upload?path='+encodeURIComponent(path));xhr.setRequestHeader('X-CSRF-Token',config.csrf);xhr.timeout=30*60*1000;xhr.upload.onprogress=e=>{if(e.lengthComputable)progress.value=e.loaded/e.total;status.textContent=`${count+1}/${files.length} · ${file.name}`};xhr.onload=()=>xhr.status===201?resolve():reject(Error(xhr.responseText||'업로드 실패'));xhr.onerror=()=>reject(Error('네트워크 연결이 끊겼습니다.'));xhr.ontimeout=()=>reject(Error('전송 시간이 초과되었습니다.'));xhr.send(file)});count++}status.textContent=`${count}개 파일을 저장했습니다.`;location.reload()}catch(error){status.textContent=error.message}finally{button.disabled=false}};
 </script></html>)";
