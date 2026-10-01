@@ -12,5 +12,8 @@ if %errorlevel%==0 (
   )
   g++ -std=c++17 -O2 sharehub.cpp -lws2_32 -o sharehub.exe
 )
-if errorlevel 1 pause & exit /b 1
+if errorlevel 1 (
+  pause
+  exit /b 1
+)
 sharehub.exe

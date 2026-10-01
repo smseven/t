@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <thread>
 #include <mutex>
+#include <cctype>
 #pragma comment(lib, "Ws2_32.lib")
 namespace fs=std::filesystem;
 static std::mutex logMutex;
@@ -21,7 +22,7 @@ static std::string dec(const std::string&s){std::string o;for(size_t i=0;i<s.siz
 static std::string esc(const std::string&s){std::string o;for(char c:s){if(c=='&')o+="&amp;";else if(c=='<')o+="&lt;";else if(c=='>')o+="&gt;";else if(c=='\"')o+="&quot;";else o+=c;}return o;}
 static bool sendAll(SOCKET s,const char*p,size_t n){while(n){int k=send(s,p,(int)std::min<size_t>(n,1<<20),0);if(k<=0)return false;p+=k;n-=k;}return true;}
 static void reply(SOCKET s,int code,const std::string&type,const std::string&body){std::string status=code==200?"OK":code==201?"Created":code==404?"Not Found":code==413?"Payload Too Large":"Bad Request";std::ostringstream h;h<<"HTTP/1.1 "<<code<<" "<<status<<"\r\nContent-Type: "<<type<<"\r\nContent-Length: "<<body.size()<<"\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n";auto x=h.str();sendAll(s,x.data(),x.size());sendAll(s,body.data(),body.size());}
-static fs::path safe(const fs::path&root,std::string rel){std::replace(rel.begin(),rel.end(),'\\','/');auto p=(root/fs::u8path(rel)).lexically_normal();auto r=root.generic_wstring(),c=fs::absolute(p).lexically_normal().generic_wstring();if(c.size()<r.size()||_wcsnicmp(c.c_str(),r.c_str(),r.size())|| (c.size()>r.size()&&c[r.size()]!=L'/'))throw std::runtime_error("Invalid path");return p;}
+static fs::path safe(const fs::path&root,std::string rel){std::replace(rel.begin(),rel.end(),'\\','/');auto p=fs::weakly_canonical(root/fs::u8path(rel));auto r=root.generic_wstring(),c=p.generic_wstring();if(c.size()<r.size()||_wcsnicmp(c.c_str(),r.c_str(),r.size())|| (c.size()>r.size()&&c[r.size()]!=L'/'))throw std::runtime_error("Invalid path");return p;}
 static void handle(SOCKET s,const fs::path&root,const std::string&token){char b[256*1024];std::string req;size_t end=std::string::npos;while((end=req.find("\r\n\r\n"))==std::string::npos&&req.size()<65536){int n=recv(s,b,sizeof(b),0);if(n<=0)return;req.append(b,n);}if(end==std::string::npos){reply(s,400,"text/plain","Bad request");return;}
  std::istringstream h(req.substr(0,end));std::string method,target,v,line;h>>method>>target>>v;size_t len=0;while(std::getline(h,line)){auto p=line.find(':');if(p!=std::string::npos){auto k=line.substr(0,p);std::transform(k.begin(),k.end(),k.begin(),::tolower);if(k=="content-length")try{len=std::stoull(line.substr(p+1));}catch(...){}}}
  auto q=target.find('?');std::string path=target.substr(0,q),query=q==std::string::npos?"":target.substr(q+1),pre="/t/"+token;if(path!=pre&&path.rfind(pre+"/",0)!=0){reply(s,404,"text/plain","Not found");return;}std::string rel=path.substr(pre.size());while(rel.size()&&rel[0]=='/')rel.erase(0,1);
