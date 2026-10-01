@@ -5,7 +5,7 @@
 | 항목 | 보안 모드 (기본값) | 비보안 모드 |
 | --- | --- | --- |
 | 실행 | `start-secure.bat` | `start-basic.bat` |
-| 명령 | `sharehub.exe --mode secure` | `sharehub.exe --mode basic` |
+| 명령 | `build\sharehub.exe --mode secure` | `build\sharehub.exe --mode basic` |
 | 전송 | HTTPS / Windows Schannel TLS 1.2 | HTTP / 암호화 없음 |
 | 최초 설정 | Windows 인증서 생성, iPhone 인증서 신뢰 설정 | 인증서 설정 불필요 |
 | 연결 코드 · 로그인 | 실행마다 새 코드, 30분 세션 | 동일. 코드와 파일은 평문 전송 |
