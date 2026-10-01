@@ -73,7 +73,7 @@ public:
 class TlsConnection {
     SOCKET socket_; CtxtHandle context_{}; bool initialized_ = false;
     SecPkgContext_StreamSizes sizes_{};
-    std::vector<char> encrypted_, plaintext_; size_t plainOffset_ = 0;
+    std::vector<char> encrypted_, plaintext_, writeBuffer_; size_t plainOffset_ = 0;
     static constexpr size_t MAX_BUFFER = 256 * 1024;
     bool rawWrite(const char* p, size_t n) {
         while (n) { int sent = ::send(socket_, p, int((std::min)(n,size_t(65536))),0); if (sent <= 0) return false; p += sent; n -= sent; } return true;
@@ -138,12 +138,25 @@ public:
     TlsConnection& operator=(const TlsConnection&) = delete;
     int read(char* buffer,int length) {
         if (length <= 0) return 0;
+        DWORD oldTimeout=0; int timeoutLength=sizeof(oldTimeout);
+        getsockopt(socket_,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<char*>(&oldTimeout),&timeoutLength);
+        struct RestoreTimeout {
+            SOCKET socket; DWORD value;
+            ~RestoreTimeout() { setsockopt(socket,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<char*>(&value),sizeof(value)); }
+        } restore{socket_,oldTimeout};
+        const ULONGLONG deadline=GetTickCount64()+15000;
+        unsigned emptyRecords=0;
         for (;;) {
             if (plainOffset_ < plaintext_.size()) {
                 size_t n = (std::min)(size_t(length),plaintext_.size()-plainOffset_);
                 std::memcpy(buffer,plaintext_.data()+plainOffset_,n); plainOffset_ += n; return int(n);
             }
             plaintext_.clear(); plainOffset_=0;
+            auto now=GetTickCount64();
+            if (now >= deadline || emptyRecords >= 128) return -1;
+            DWORD remaining=DWORD(deadline-now);
+            if (oldTimeout && oldTimeout < remaining) remaining=oldTimeout;
+            if (setsockopt(socket_,SOL_SOCKET,SO_RCVTIMEO,reinterpret_cast<char*>(&remaining),sizeof(remaining)) != 0) return -1;
             if (encrypted_.empty() && !receive()) return -1;
             SecBuffer b[4]{{ULONG(encrypted_.size()),SECBUFFER_DATA,encrypted_.data()},{0,SECBUFFER_EMPTY,nullptr},{0,SECBUFFER_EMPTY,nullptr},{0,SECBUFFER_EMPTY,nullptr}};
             SecBufferDesc desc{SECBUFFER_VERSION,4,b};
@@ -160,17 +173,26 @@ public:
                 if (item.BufferType == SECBUFFER_EXTRA) extra=item.cbBuffer;
             }
             keepExtra(extra);
+            if (plaintext_.empty()) ++emptyRecords;
         }
     }
     bool writeAll(const char* data,size_t length) {
         while (length) {
             ULONG chunk=ULONG((std::min)(length,size_t(sizes_.cbMaximumMessage)));
-            std::vector<char> record(size_t(sizes_.cbHeader)+chunk+sizes_.cbTrailer);
+            // Reuse storage and send each complete TLS record in one socket call.
+            // Sending header/data/trailer separately creates many small packets.
+            auto& record = writeBuffer_;
+            record.resize(size_t(sizes_.cbHeader)+chunk+sizes_.cbTrailer);
             std::memcpy(record.data()+sizes_.cbHeader,data,chunk);
             SecBuffer b[4]{{sizes_.cbHeader,SECBUFFER_STREAM_HEADER,record.data()},{chunk,SECBUFFER_DATA,record.data()+sizes_.cbHeader},{sizes_.cbTrailer,SECBUFFER_STREAM_TRAILER,record.data()+sizes_.cbHeader+chunk},{0,SECBUFFER_EMPTY,nullptr}};
             SecBufferDesc desc{SECBUFFER_VERSION,4,b};
             if (EncryptMessage(&context_,0,&desc,0) != SEC_E_OK) return false;
-            for (int i=0;i<3;++i) if (!rawWrite(static_cast<char*>(b[i].pvBuffer),b[i].cbBuffer)) return false;
+            size_t encoded = 0;
+            for (int i=0;i<3;++i) {
+                std::memmove(record.data()+encoded,b[i].pvBuffer,b[i].cbBuffer);
+                encoded += b[i].cbBuffer;
+            }
+            if (!rawWrite(record.data(),encoded)) return false;
             data+=chunk; length-=chunk;
         }
         return true;

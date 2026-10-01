@@ -1,0 +1,9 @@
+*.exe
+*.obj
+*.pdb
+*.ilk
+/Shared/
+/tls-cert.txt
+/root-cert.cer
+/build/
+__pycache__/
