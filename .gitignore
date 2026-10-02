@@ -2,7 +2,8 @@
 *.obj
 *.pdb
 *.ilk
-/Shared/
+/Shared/*
+!/Shared/.gitignore
 /tls-cert.txt
 /root-cert.cer
 /build/
