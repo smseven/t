@@ -24,6 +24,7 @@ struct PairingWindow::Impl {
     bool http;
     std::function<std::string()> issue;
     std::function<int(const std::string&)> status;
+    std::function<bool()> takeRefreshRequest;
     std::function<void()> stop;
     std::thread thread;
     std::atomic<HWND> window{nullptr};
@@ -36,8 +37,8 @@ struct PairingWindow::Impl {
     int previous = -999;
 
     Impl(std::vector<std::string> o, bool h, std::function<std::string()> i,
-         std::function<int(const std::string&)> s, std::function<void()> e)
-        : origins(std::move(o)), http(h), issue(std::move(i)), status(std::move(s)), stop(std::move(e)) {}
+         std::function<int(const std::string&)> s, std::function<bool()> r, std::function<void()> e)
+        : origins(std::move(o)), http(h), issue(std::move(i)), status(std::move(s)), takeRefreshRequest(std::move(r)), stop(std::move(e)) {}
 
     void refresh() {
         int left = status(ticket);
@@ -77,12 +78,12 @@ struct PairingWindow::Impl {
         FillRect(dc, &r, (HBRUSH)GetStockObject(WHITE_BRUSH));
         auto old = SelectObject(dc, font); SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, http ? RGB(180,45,20) : RGB(20,90,50));
-        RECT mode{24,14,r.right-24,44};
+        RECT mode{16,8,r.right-16,34};
         DrawTextW(dc, http ? L"비보안 모드 · HTTP · 전송 암호화 없음" : L"보안 모드 · HTTPS 암호화", -1, &mode, DT_LEFT);
         SetTextColor(dc, RGB(25,25,25));
-        RECT hint{24,100,r.right-24,185};
+        RECT hint{16,78,r.right-16,140};
         DrawTextW(dc, http ? L"1. PC와 아이폰을 같은 Wi-Fi에 연결하세요.\n2. 아이폰 카메라로 QR을 찍고 링크를 누르면\n   자동 연결됩니다." : L"1. PC와 아이폰을 같은 Wi-Fi에 연결하세요.\n2. 아이폰에서 설정한 인증서를 신뢰해야 합니다.\n3. 카메라로 QR을 찍고 링크를 누르면 자동 연결됩니다.", -1, &hint, DT_LEFT | DT_WORDBREAK);
-        RECT area{24,194,r.right-24,r.bottom-65};
+        RECT area{16,146,r.right-16,r.bottom-50};
         if (active && qr) {
             int modules = qr->getSize(), total = modules + 8;
             int scale = std::min(area.right-area.left, area.bottom-area.top)/total;
@@ -111,7 +112,7 @@ struct PairingWindow::Impl {
                 try { self->generate(); } catch (...) {} return 0;
             } break;
         case WM_TIMER:
-            try { self->refresh(); } catch (...) { self->active=false; InvalidateRect(hwnd,nullptr,FALSE); } return 0;
+            try { if(self->takeRefreshRequest()) self->generate(); else self->refresh(); } catch (...) { self->active=false; InvalidateRect(hwnd,nullptr,FALSE); } return 0;
         case WM_CLOSE:
             if(!self->disposing.load() && !self->stopSent) {
                 self->stopSent=true;
@@ -132,15 +133,15 @@ struct PairingWindow::Impl {
             if(!RegisterClassW(&wc) && GetLastError()!=ERROR_CLASS_ALREADY_EXISTS) throw std::runtime_error("Cannot register pairing window");
             RECT work{};
             if (!SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0)) work={0,0,1024,768};
-            int height=std::min(740,static_cast<int>(work.bottom-work.top)-24);
+            int height=std::min(430,static_cast<int>(work.bottom-work.top)-24);
             HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"ShareHub · 아이폰 QR 페어링",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN,
-                CW_USEDEFAULT,CW_USEDEFAULT,570,height,nullptr,nullptr,instance,this);
+                CW_USEDEFAULT,CW_USEDEFAULT,360,height,nullptr,nullptr,instance,this);
             if(!hwnd) throw std::runtime_error("Cannot create pairing window");
-            font=CreateFontW(-18,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Malgun Gothic");
-            combo=CreateWindowExW(0,L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,24,52,350,240,hwnd,(HMENU)1,instance,nullptr);
-            HWND button=CreateWindowExW(0,L"BUTTON",L"새 QR",WS_CHILD|WS_VISIBLE|WS_TABSTOP,390,52,130,32,hwnd,(HMENU)2,instance,nullptr);
+            font=CreateFontW(-16,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,DEFAULT_QUALITY,DEFAULT_PITCH,L"Malgun Gothic");
+            combo=CreateWindowExW(0,L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,16,42,220,210,hwnd,(HMENU)1,instance,nullptr);
+            HWND button=CreateWindowExW(0,L"BUTTON",L"새 QR",WS_CHILD|WS_VISIBLE|WS_TABSTOP,250,42,94,30,hwnd,(HMENU)2,instance,nullptr);
             RECT client{}; GetClientRect(hwnd,&client);
-            label=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_CENTER,18,client.bottom-54,530,40,hwnd,nullptr,instance,nullptr);
+            label=CreateWindowExW(0,L"STATIC",L"",WS_CHILD|WS_VISIBLE|SS_CENTER,10,client.bottom-44,340,34,hwnd,nullptr,instance,nullptr);
             if(!combo || !button || !label || !font) throw std::runtime_error("Cannot create pairing controls");
             for(HWND control:{combo,button,label}) SendMessageW(control,WM_SETFONT,(WPARAM)font,TRUE);
             for(const auto& origin:origins) SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)wide(origin).c_str());
@@ -158,9 +159,10 @@ struct PairingWindow::Impl {
 };
 
 PairingWindow::PairingWindow(std::vector<std::string> origins,bool httpMode,
-    std::function<std::string()> issueTicket,std::function<int(const std::string&)> ticketStatus,std::function<void()> stopServer) {
-    if(origins.empty() || !issueTicket || !ticketStatus || !stopServer) throw std::invalid_argument("Missing pairing window configuration");
-    impl_.reset(new Impl(std::move(origins),httpMode,std::move(issueTicket),std::move(ticketStatus),std::move(stopServer)));
+    std::function<std::string()> issueTicket,std::function<int(const std::string&)> ticketStatus,
+    std::function<bool()> takeRefreshRequest,std::function<void()> stopServer) {
+    if(origins.empty() || !issueTicket || !ticketStatus || !takeRefreshRequest || !stopServer) throw std::invalid_argument("Missing pairing window configuration");
+    impl_.reset(new Impl(std::move(origins),httpMode,std::move(issueTicket),std::move(ticketStatus),std::move(takeRefreshRequest),std::move(stopServer)));
     std::promise<void> ready; auto future=ready.get_future();
     impl_->thread=std::thread([this,p=std::move(ready)]() mutable {impl_->run(std::move(p));});
     try {future.get();} catch (...) {impl_->thread.join();throw;}

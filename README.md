@@ -21,7 +21,7 @@ Windows에 QR 페어링 창이 열립니다. 같은 Wi-Fi의 iPhone 카메라로
 
 QR은 기본 2분 동안 한 번만 사용할 수 있습니다. 만료되거나 이미 연결했다면 Windows 창에서 **새 QR**을 누르세요. 새 QR을 만들면 이전 QR은 즉시 무효가 됩니다. 보안 모드는 최초 아이폰 인증서 신뢰 설정이 필요합니다. 인증서를 설정하는 동안 QR이 만료되었다면 새 QR을 만드세요. QR 생성에는 외부 서비스나 인터넷을 사용하지 않습니다.
 
-수동 입력도 사용할 수 있습니다. 실행 창의 주소를 Safari에서 열고 `Pairing code`를 입력하세요. 수동 연결 코드는 URL과 파일에 저장하지 않습니다. QR에는 별도의 일회용 토큰을 넣고, 브라우저는 이를 주소에서 지운 다음 서버에 전송합니다. 연결된 iPhone에서는 `연결 종료` 버튼으로 세션을 해제할 수 있습니다. 업로드 대상에 같은 이름의 파일이 있으면 거절하므로 새 이름으로 업로드하세요.
+수동 입력도 사용할 수 있습니다. 실행 창의 주소를 Safari에서 열고 `Pairing code`를 입력하세요. 로그인 화면의 **카메라로 QR 스캔하여 연결**을 누르면 Safari 카메라 권한을 요청하고, Windows 창의 QR을 읽어 바로 연결합니다. 카메라 접근은 HTTPS와 사용자의 권한이 필요합니다. 카메라 프레임은 기기 안에서만 처리됩니다. 연결된 iPhone에서 `연결 종료`를 누르면 연결 화면으로 돌아갑니다. 화면의 `QR 다시 요청`을 누르면 Windows 페어링 창의 QR이 새로 발급되므로 아이폰 카메라로 다시 스캔하세요. 업로드 대상에 같은 이름의 파일이 있으면 거절하므로 새 이름으로 업로드하세요.
 
 이전 버전의 `Cross-origin request denied` 로그인 오류도 수정했습니다. 로그인 폼의 Origin을 `null`로 만드는 `no-referrer` 정책을 `same-origin`으로 바꾸고, 브라우저 로그인 전송에 맞는 문자 인코딩 표기를 처리합니다. 외부 사이트의 요청과 `Origin: null`은 계속 거절합니다. [브라우저 Referrer-Policy 동작 설명](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Referrer-Policy#effect_on_the_origin_header).
 

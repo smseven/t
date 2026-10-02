@@ -329,5 +329,23 @@ class SecurityChecks(unittest.TestCase):
             s.close()
 
 
+    def test_15_qr_refresh_request(self):
+        s = Server()
+        try:
+            status, headers, page = s.request("GET", "/")
+            self.assertEqual(status, 200)
+            self.assertIn(b"id=qr-request", page)
+            self.assertIn(b"id=scan-start", page)
+            self.assertIn(b"getUserMedia", page)
+            self.assertIn(b"jsQR", page)
+            self.assertEqual(headers["Permissions-Policy"].split(",", 1)[0], "camera=(self)")
+            self.assertEqual(s.request("GET", "/pair")[1]["Permissions-Policy"].split(",", 1)[0], "camera=()")
+            self.assertEqual(s.request("POST", "/qr/request")[0], 202)
+            self.assertEqual(s.request("POST", "/qr/request")[0], 429)
+            self.assertEqual(s.request("POST", "/qr/request", headers={"Origin": "https://attacker.invalid"})[0], 403)
+        finally:
+            s.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

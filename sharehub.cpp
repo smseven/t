@@ -22,6 +22,7 @@
 #include "security.hpp"
 #include "tls_transport.hpp"
 #include "pairing_window.hpp"
+#include "third_party/jsqr/jsQR.inc.hpp"
 
 using Clock = std::chrono::steady_clock;
 constexpr size_t HEADER_LIMIT = 16 * 1024;
@@ -187,11 +188,12 @@ static std::string statusName(int code) {
     }
 }
 static bool sendHeaders(Connection& c, int code, const std::string& type, uint64_t length,
-                        const std::string& extra = "", const std::string& nonce = "") {
+                        const std::string& extra = "", const std::string& nonce = "", bool allowCamera = false) {
     std::ostringstream h;
     h << "HTTP/1.1 " << code << " " << statusName(code) << "\r\nContent-Type: " << type << "\r\nContent-Length: " << length
       << "\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: same-origin"
-      << "\r\nX-Frame-Options: DENY\r\nPermissions-Policy: camera=(), microphone=(), geolocation=()\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; connect-src 'self'; ";
+      << "\r\nX-Frame-Options: DENY\r\nPermissions-Policy: camera=" << (allowCamera ? "(self)" : "()")
+      << ", microphone=(), geolocation=()\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; connect-src 'self'; ";
     if (nonce.empty()) h << "script-src 'none'; style-src 'none'";
     else h << "script-src 'nonce-" << nonce << "'; style-src 'nonce-" << nonce << "'";
     h << "\r\n" << extra << "\r\n";
@@ -221,6 +223,8 @@ class Authentication {
     std::string qrTicket_;
     Clock::time_point qrExpires_{};
     bool qrUsed_ = false;
+    bool qrRefreshRequested_ = false;
+    Clock::time_point lastQrRefreshRequest_{};
     int qrSeconds_;
     void cleanup() {
         auto now = Clock::now();
@@ -254,8 +258,23 @@ public:
     }
     std::string issueQrTicket() {
         std::lock_guard<std::mutex> lock(mutex_);
+        qrRefreshRequested_ = false;
         qrTicket_ = randomHex(); qrExpires_ = Clock::now() + std::chrono::seconds(qrSeconds_); qrUsed_ = false;
         return qrTicket_;
+    }
+    bool requestQrRefresh() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto now = Clock::now();
+        if (lastQrRefreshRequest_ != Clock::time_point{} && now - lastQrRefreshRequest_ < std::chrono::seconds(3)) return false;
+        lastQrRefreshRequest_ = now;
+        qrRefreshRequested_ = true;
+        return true;
+    }
+    bool takeQrRefreshRequest() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        bool requested = qrRefreshRequested_;
+        qrRefreshRequested_ = false;
+        return requested;
     }
     int qrStatus(const std::string& ticket) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -317,22 +336,33 @@ static void validateOrigin(const Request& r, bool httpMode, const std::string& l
 }
 
 static std::string pageStart(const std::string& nonce) {
-    return "<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>ShareHub</title><style nonce='" + nonce + R"('>
-body{font:16px system-ui;max-width:780px;margin:32px auto;padding:0 20px;color:#182230}h1{font-size:1.6rem}.box{background:#f3f6fa;padding:20px;border-radius:12px;margin:20px 0}input{max-width:100%;box-sizing:border-box;margin:10px 0}input[type=password]{width:100%;padding:12px}button{padding:10px 16px;background:#155eef;color:white;border:0;border-radius:8px;font:inherit;cursor:pointer}button:disabled{opacity:.5}li{padding:10px 0;overflow-wrap:anywhere}small{color:#667085}progress{width:100%;margin-top:12px}#status{white-space:pre-wrap}.row{display:flex;gap:12px;align-items:center;justify-content:space-between}</style><h1>ShareHub</h1>)";
+    return "<!doctype html><html lang=ko><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name=theme-color content='#f4f7fb'><title>ShareHub</title><style nonce='" + nonce + R"('>
+:root{color-scheme:light;--ink:#17243b;--muted:#65748b;--line:#dce4ef;--paper:#fff;--blue:#315ee8;--blue-dark:#2348bf;--green:#137a56;--red:#a33b31;--wash:#f4f7fb}
+*{box-sizing:border-box}body{font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;max-width:760px;min-height:100vh;margin:0 auto;padding:26px 22px 48px;color:var(--ink);background:radial-gradient(ellipse at 50% -10%,#e2ebff 0,transparent 52%),var(--wash);-webkit-text-size-adjust:100%}
+.brand{display:flex;align-items:center;gap:13px;margin:0 0 25px}.brand-mark{display:grid;place-items:center;width:44px;height:44px;border-radius:15px;background:linear-gradient(145deg,#527bff,#294ecb);box-shadow:0 5px 14px #315ee833;color:white;font-size:14px;font-weight:800;letter-spacing:-.06em}.brand-kicker{margin:0;color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.16em}.brand h1{margin:0;font-size:22px;line-height:1.2;letter-spacing:-.04em}
+p{margin:12px 0;color:var(--muted)}h2{margin:25px 0 12px;font-size:18px;letter-spacing:-.02em}.mode{display:inline-flex;align-items:center;padding:5px 10px;border:1px solid #cbd8f2;border-radius:99px;background:#edf2ff;color:#3153b6;font-size:13px}.mode strong{font-weight:700;margin:0 0 8px}
+.box{padding:22px;background:var(--paper);border:1px solid var(--line);border-radius:20px;box-shadow:0 10px 30px #263b5a0b;margin:18px 0}.box p:first-child{margin-top:0}label{display:block;margin:12px 0 7px;color:#35445b;font-weight:650;font-size:14px}input{max-width:100%;box-sizing:border-box;margin:8px 0}input[type=password]{display:block;width:100%;padding:13px 14px;border:1px solid #cbd5e1;border-radius:11px;background:#fff;color:var(--ink);font:inherit;outline:none}input:focus{border-color:var(--blue);box-shadow:0 0 0 3px #315ee822}input[type=file]{display:block;width:100%;padding:10px;border:1px dashed #bdc9d9;border-radius:12px;background:#f8faff;color:var(--muted);font:14px system-ui}
+button{min-height:44px;padding:10px 16px;border:0;border-radius:12px;background:var(--blue);box-shadow:0 4px 10px #315ee822;color:#fff;font:650 15px system-ui,sans-serif;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}button:hover{background:var(--blue-dark)}button:active{transform:translateY(1px)}button:disabled{opacity:.55;cursor:wait}#login button{width:100%;margin-top:5px}#qr-request{margin-top:14px;background:#eef3ff;color:#3153b6;box-shadow:none}#qr-request:hover{background:#e2eaff}#scan-start{width:100%;margin-top:12px;background:var(--green);box-shadow:0 4px 10px #137a5622}#scan-stop{margin-top:10px;background:#46546b;box-shadow:none}
+#status,#qr-status,#scan-status{min-height:1.3em;margin:8px 0 0;color:var(--muted);font-size:14px;white-space:pre-wrap}#scan-box{margin-top:14px;padding:12px;border-radius:15px;background:#edf1f7}#scan-video{display:block;width:100%;max-height:55vh;border-radius:10px;background:#111;object-fit:cover}small{color:var(--muted);font-size:12px}progress{display:block;width:100%;height:9px;margin-top:14px;accent-color:var(--blue)}
+.row{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:15px 17px;border:1px solid var(--line);border-radius:16px;background:var(--paper);box-shadow:0 5px 18px #263b5a08}.row>span{min-width:0;overflow-wrap:anywhere;font-weight:650}.row button{flex:none;background:#fceeed;color:var(--red);box-shadow:none}.row button:hover{background:#f8dfdc}.files{list-style:none;padding:0;margin:0;border:1px solid var(--line);border-radius:16px;background:var(--paper);overflow:hidden}.files li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid #edf0f5;overflow-wrap:anywhere}.files li:last-child{border-bottom:0}.files a{color:#244dbd;text-decoration:none;font-weight:550;overflow-wrap:anywhere}.files a:hover{text-decoration:underline}.files small{flex:none;text-align:right}.parent-link{display:inline-flex;align-items:center;min-height:40px;padding:6px 12px;border-radius:10px;background:#e9eef8;color:#3153b6;text-decoration:none;font-weight:600}.upload-card{margin-top:18px}#upload p{font-size:13px}
+@media(max-width:520px){body{padding:calc(17px + env(safe-area-inset-top)) 16px calc(30px + env(safe-area-inset-bottom))}.brand{margin-bottom:20px}.box{padding:17px;border-radius:17px}h2{margin-top:22px}.files li{padding:12px 11px}.row{padding:12px}.row button{padding:9px 11px;font-size:14px}#scan-video{max-height:48vh}}
+</style><header class=brand><span class=brand-mark>SH</span><div><p class=brand-kicker>PRIVATE FILE TRANSFER</p><h1>ShareHub</h1></div></header>)";
 }
-static void sendPage(Connection& c, const std::string& body, const std::string& nonce) {
-    if (sendHeaders(c, 200, "text/html; charset=utf-8", body.size(), "", nonce)) c.write(body.data(), body.size());
+static void sendPage(Connection& c, const std::string& body, const std::string& nonce, bool allowCamera = false) {
+    if (sendHeaders(c, 200, "text/html; charset=utf-8", body.size(), "", nonce, allowCamera)) c.write(body.data(), body.size());
 }
 static void loginPage(Connection& c, bool httpMode) {
     auto nonce = randomHex(16);
-    auto body = pageStart(nonce) + (httpMode ? "<p><strong>비보안 모드 · HTTP</strong> — 연결 코드와 파일이 암호화되지 않습니다.</p>" : "<p><strong>보안 모드 · HTTPS</strong> — 연결 코드와 파일을 암호화하여 전송합니다.</p>") + R"(<p>아이폰 카메라로 Windows 앱의 QR 코드를 찍고 링크를 누르면 자동으로 연결됩니다.</p><p>또는 연결 코드를 직접 입력하세요. 연결은 30분 동안 유효합니다.</p><div class=box><form id=login method=post action=/login><label>연결 코드<input name=code type=password autocomplete=off required maxlength=32 spellcheck=false></label><button>연결</button><p id=status aria-live=polite></p></form></div><script nonce=')" + nonce + R"('>
+    auto body = pageStart(nonce) + (httpMode ? "<p class=mode><strong>비보안 모드 · HTTP</strong> — 연결 코드와 파일이 암호화되지 않습니다.</p>" : "<p class=mode><strong>보안 모드 · HTTPS</strong> — 연결 코드와 파일을 암호화하여 전송합니다.</p>") + R"(<p>아이폰 카메라로 Windows 앱의 QR 코드를 찍고 링크를 누르면 자동으로 연결됩니다.</p><p>또는 연결 코드를 직접 입력하세요. 연결은 30분 동안 유효합니다.</p><div class=box><form id=login method=post action=/login><label>연결 코드<input name=code type=password autocomplete=off required maxlength=32 spellcheck=false></label><button>연결</button><p id=status aria-live=polite></p></form><button id=qr-request type=button>QR &#45796;&#49884; &#50836;&#52397;</button><p id=qr-status aria-live=polite></p><button id=scan-start type=button>&#52852;&#47700;&#46972;&#47196; QR &#49828;&#52896;&#54616;&#50668; &#50672;&#44208;</button><div id=scan-box hidden><video id=scan-video autoplay playsinline muted></video><button id=scan-stop type=button>&#52852;&#47700;&#46972; &#45803;&#44592;</button><p id=scan-status aria-live=polite></p></div></div><script nonce=')" + nonce + "'>" + SHAREHUB_JSQR_SOURCE + "</script><script nonce='" + nonce + R"('>
+const scanStart=document.querySelector('#scan-start'),scanBox=document.querySelector('#scan-box'),scanVideo=document.querySelector('#scan-video'),scanCanvas=document.createElement('canvas'),scanCtx=scanCanvas.getContext('2d',{willReadFrequently:true}),scanStatus=document.querySelector('#scan-status');let scanStream=null,scanFrame=0,scanBusy=false,lastScan=0;const stopCamera=()=>{cancelAnimationFrame(scanFrame);scanFrame=0;if(scanStream){scanStream.getTracks().forEach(track=>track.stop());scanStream=null}scanVideo.srcObject=null;scanBox.hidden=true;scanStart.disabled=false};document.querySelector('#scan-stop').onclick=stopCamera;const scanTick=async now=>{if(!scanStream||scanBusy)return;if(now-lastScan<150){scanFrame=requestAnimationFrame(scanTick);return}lastScan=now;const w=scanVideo.videoWidth,h=scanVideo.videoHeight,scale=Math.min(1,1280/Math.max(w,h,1)),cw=Math.round(w*scale),ch=Math.round(h*scale);if(w&&h){scanCanvas.width=cw;scanCanvas.height=ch;scanCtx.drawImage(scanVideo,0,0,cw,ch);const found=jsQR(scanCtx.getImageData(0,0,cw,ch).data,cw,ch,{inversionAttempts:'dontInvert'});if(found){try{const target=new URL(found.data),fragment=new URLSearchParams(target.hash.slice(1));if(target.origin!==location.origin||target.pathname!=='/pair'||target.search||Array.from(fragment.keys()).length!==1||!/^[a-f0-9]{64}$/.test(fragment.get('ticket')||'')){scanStatus.textContent='ShareHub QR code not recognized. Point at the QR shown in the Windows app.'}else{scanBusy=true;scanStatus.textContent='Connecting?';stopCamera();const payload=new URLSearchParams({ticket:fragment.get('ticket')});fragment.delete('ticket');const response=await fetch('/pair',{method:'POST',mode:'cors',credentials:'same-origin',referrerPolicy:'same-origin',headers:{'X-Pairing-Request':'1'},body:payload});payload.set('ticket','');if(response.ok){location.replace('/browse');return}scanBusy=false;scanBox.hidden=false;scanStatus.textContent=response.status===410?'QR expired or already used. Request a new QR.':'QR pairing failed. Please try again.'}}catch(e){scanStatus.textContent='QR pairing failed. Check the connection and try again.'}}}scanFrame=requestAnimationFrame(scanTick)};scanStart.onclick=async()=>{if(!window.isSecureContext||!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){scanStatus.textContent='Camera scanning requires trusted HTTPS. Use the iPhone Camera app or set up the secure mode certificate.';scanBox.hidden=false;return}scanStart.disabled=true;scanBox.hidden=false;scanStatus.textContent='Allow camera access, then point at the Windows QR code.';try{scanStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'}}});scanVideo.srcObject=scanStream;await scanVideo.play();scanTick(performance.now())}catch(e){stopCamera();scanBox.hidden=false;scanStatus.textContent='Could not start the camera. Check Safari camera permission and retry.';scanStart.disabled=false}};
+document.querySelector('#qr-request').onclick=async event=>{const button=event.currentTarget,status=document.querySelector('#qr-status');button.disabled=true;status.textContent='Windows 앱에 새 QR을 요청하는 중…';try{const r=await fetch('/qr/request',{method:'POST',mode:'cors',credentials:'same-origin',referrerPolicy:'same-origin'});status.textContent=r.ok?'Windows 앱의 QR이 갱신되었습니다. 새 QR을 스캔하세요.':r.status===429?'잠시 후 다시 요청해 주세요.':'QR을 요청하지 못했습니다. Windows 앱이 실행 중인지 확인하세요.'}catch(e){status.textContent='연결하지 못했습니다. Wi-Fi를 확인해 주세요.'}finally{button.disabled=false}};
 document.querySelector('#login').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,button=form.querySelector('button'),status=document.querySelector('#status');button.disabled=true;status.textContent='연결 중…';try{const response=await fetch('/login',{method:'POST',mode:'cors',credentials:'same-origin',referrerPolicy:'same-origin',body:new URLSearchParams(new FormData(form))});if(response.ok){form.reset();location.replace('/browse')}else{status.textContent=response.status===401?'연결 코드가 올바르지 않습니다.':response.status===429?'입력 시도가 너무 많습니다. 1분 후 다시 시도하세요.':'연결하지 못했습니다. 페이지를 새로고침하고 다시 시도하세요.'}}catch(error){status.textContent='연결을 확인하고 다시 시도하세요.'}finally{button.disabled=false}};
 </script></html>)";
-    sendPage(c, body, nonce);
+    sendPage(c, body, nonce, true);
 }
 static void qrLandingPage(Connection& c, bool httpMode) {
     auto nonce = randomHex(16);
-    auto body = pageStart(nonce) + (httpMode ? "<p><strong>비보안 모드 · HTTP</strong> — 연결 정보와 파일이 암호화되지 않습니다.</p>" : "<p><strong>보안 모드 · HTTPS</strong></p>") + R"(<section class=box><p id=status aria-live=polite>QR로 연결 중…</p><a href='/'>수동 연결 화면</a></section><script nonce=')" + nonce + R"('>
+    auto body = pageStart(nonce) + (httpMode ? "<p class=mode><strong>비보안 모드 · HTTP</strong> — 연결 정보와 파일이 암호화되지 않습니다.</p>" : "<p class=mode><strong>보안 모드 · HTTPS</strong></p>") + R"(<section class=box><p id=status aria-live=polite>QR로 연결 중…</p><a href='/'>수동 연결 화면</a></section><script nonce=')" + nonce + R"('>
 (async()=>{const params=new URLSearchParams(location.hash.slice(1));let ticket=params.get('ticket')||'';history.replaceState(null,'','/pair');const status=document.querySelector('#status');if(Array.from(params.keys()).length!==1||!/^[a-f0-9]{64}$/.test(ticket)){status.textContent='올바른 QR 링크가 아닙니다. Windows 앱에서 새 QR을 찍어 주세요.';return}try{const body=new URLSearchParams({ticket});ticket='';params.delete('ticket');const response=await fetch('/pair',{method:'POST',mode:'cors',credentials:'same-origin',referrerPolicy:'same-origin',headers:{'X-Pairing-Request':'1'},body});if(response.ok){location.replace('/browse')}else if(response.status===410||response.status===401){status.textContent='QR이 만료되었거나 이미 사용되었습니다. Windows 앱에서 새 QR을 찍어 주세요.'}else if(response.status===429){status.textContent='연결 시도가 너무 많습니다. 잠시 후 다시 시도하세요.'}else{status.textContent='연결하지 못했습니다. Windows 앱에서 새 QR을 찍어 주세요.'}}catch(error){status.textContent='연결이 끊겼습니다. Wi-Fi를 확인하고 Windows 앱에서 새 QR을 찍어 주세요.'}})();
 </script></html>)";
     sendPage(c, body, nonce);
@@ -344,7 +374,7 @@ static void browse(Connection& c, State& state, const Session& session, const st
     auto dir = state.folder.directory(relative);
     auto nonce = randomHex(16);
     std::ostringstream body;
-    body << pageStart(nonce) << (state.httpMode ? "<p><strong>비보안 모드 · HTTP</strong> — 파일과 연결 코드가 암호화되지 않습니다.</p>" : "<p><strong>보안 모드 · HTTPS</strong> — 암호화 전송 중</p>") << "<div class=row><span>" << escape(relative.empty() ? "공유 폴더" : relative)
+    body << pageStart(nonce) << (state.httpMode ? "<p class=mode><strong>비보안 모드 · HTTP</strong> — 파일과 연결 코드가 암호화되지 않습니다.</p>" : "<p class=mode><strong>보안 모드 · HTTPS</strong> — 암호화 전송 중</p>") << "<div class=row><span>" << escape(relative.empty() ? "공유 폴더" : relative)
          << "</span><button id=logout>연결 종료</button></div>";
     if (!relative.empty()) {
         auto slash = relative.find_last_of('/');
@@ -352,7 +382,7 @@ static void browse(Connection& c, State& state, const Session& session, const st
     }
     if (!state.readOnly) body << R"(<section class=box><form id=upload><label>파일 선택 <input id=files type=file multiple></label><br><label>폴더 선택 <input id=folder type=file multiple webkitdirectory></label><p><small>기존 파일은 덮어쓰지 않습니다. 파일당 최대 2 GiB입니다.</small></p><button id=send>업로드</button><progress id=progress value=0 max=1></progress><p id=status aria-live=polite></p></form></section>)";
     else body << "<p>이 공유는 다운로드만 허용합니다.</p>";
-    body << "<h2>파일</h2><ul>";
+    body << "<h2>파일</h2><ul class=files>";
     struct Item { std::string name; bool directory; uint64_t size; };
     std::vector<Item> entries;
     for (const auto& item : fs::directory_iterator(dir.path, fs::directory_options::skip_permission_denied)) {
@@ -394,6 +424,11 @@ static void serve(Connection& c, State& state, const std::string& peer, const st
     if (r.path == "/pair" && r.method == "GET") {
         if (!r.query.empty()) throw HttpError(400, "QR credentials must not be placed in the URL query");
         qrLandingPage(c, state.httpMode); return;
+    }
+    if (r.path == "/qr/request" && r.method == "POST") {
+        if (r.length) throw HttpError(400, "Unexpected QR request body");
+        if (!state.authentication.requestQrRefresh()) throw HttpError(429, "Wait before requesting another QR");
+        reply(c, 202, "QR refresh requested"); return;
     }
     if (r.path == "/pair" && r.method == "POST") {
         if (!r.query.empty() || r.header("x-pairing-request") != "1" || r.contentType() != "application/x-www-form-urlencoded")
@@ -625,6 +660,7 @@ int main() {
             qrWindow = std::make_unique<PairingWindow>(origins, httpMode,
                 [&state] { return state.authentication.issueQrTicket(); },
                 [&state](const std::string& ticket) { return state.authentication.qrStatus(ticket); },
+                [&state] { return state.authentication.takeQrRefreshRequest(); },
                 [] { auto socket = listener.exchange(INVALID_SOCKET); if (socket != INVALID_SOCKET) closesocket(socket); });
         }
         for (;;) {

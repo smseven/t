@@ -10,6 +10,7 @@ public:
     PairingWindow(std::vector<std::string> origins, bool httpMode,
                   std::function<std::string()> issueTicket,
                   std::function<int(const std::string&)> ticketStatus,
+                  std::function<bool()> takeRefreshRequest,
                   std::function<void()> stopServer);
     ~PairingWindow();
     PairingWindow(const PairingWindow&) = delete;
